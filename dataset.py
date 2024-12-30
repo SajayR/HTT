@@ -59,7 +59,7 @@ def load_and_preprocess_video(video_path: str, sample_fps: int) -> torch.Tensor:
     original_fps = float(video_stream.average_rate)
     video_duration = 1.0
     num_original_frames = int(round(original_fps * video_duration))
-    frame_indices = np.linspace(0, num_original_frames - 1, 3, dtype=int)
+    frame_indices = np.linspace(0, num_original_frames - 1, sample_fps, dtype=int)
 
     frames = []
     for chosen_index in frame_indices:
@@ -191,14 +191,14 @@ def collate_fn(batch):
         'video_paths': [str(item['video_path']) for item in batch]
     }
 
-#if __name__ == "__main__":
-    '''from torch.utils.data import DataLoader
+if __name__ == "__main__":
+    from torch.utils.data import DataLoader
     from tqdm import tqdm
     import matplotlib.pyplot as plt
 
     dataset = AudioVisualDataset(
         data_root="/home/cis/VGGSound_Splits",
-        sample_fps=20
+        sample_fps=8
     )
 
     batch_sampler = VideoBatchSampler(
@@ -228,12 +228,12 @@ def collate_fn(batch):
         frames = frames * IMAGENET_STD.unsqueeze(0) + IMAGENET_MEAN.unsqueeze(0)
         
         plt.figure(figsize=(20, 4))
-        for i in range(3):
-            plt.subplot(1, 10, i+1)
+        for i in range(8):
+            plt.subplot(1, 8, i+1)
             plt.imshow(frames[i].permute(1, 2, 0).clip(0, 1))
             plt.axis('off')
             plt.title(f'Frame {i}')
         plt.tight_layout()
         plt.savefig('frame_visualization.png')
         plt.close()
-        break  # Just test one batch'''
+        break  # Just test one batch
