@@ -132,7 +132,7 @@ class VideoBatchSampler(Sampler):
         return self.total_samples // self.batch_size
 
 class AudioVisualDataset(Dataset):
-    def __init__(self, data_root: str, sample_fps: int = 20):
+    def __init__(self, data_root: str, sample_fps: int = 8):
         self.data_root = Path(data_root)
         self.sample_fps = sample_fps
         self.video_files = sorted(list(self.data_root.glob("*.mp4")))
@@ -167,7 +167,7 @@ class AudioVisualDataset(Dataset):
             print(f"Error processing {self.video_files[idx]}: {str(e)}")
             return {
                 'video_path': str(self.video_files[idx]),
-                'video_frames': torch.zeros(3, 224, 224),
+                'video_frames': torch.zeros(8, 3, 224, 224),
                 'audio': torch.zeros(16331),
                 'vid_num': -1,
                 'segment_num': -1

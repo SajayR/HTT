@@ -7,28 +7,24 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class AudioVisualModel(nn.Module):
-    def __init__(self, temperature=2.5, initial_threshold=-2.5, scale_factor=2.5, alpha=10.0):
+    def __init__(self, temperature=2):
         """
+        A simplified Audio-Visual model with two small regularization terms:
+          - non-negative pressure
+          - temperature >= 1 pressure
+
         Args:
-            temperature: Initial temperature for contrastive scaling
-            initial_threshold: Initialized threshold parameter (before sigmoid)
-            scale_factor: Multiplier for gating
-            alpha: Sharpness factor for soft gating
+            temperature (float): Softmax temperature for contrastive scaling
         """
         super().__init__()
         
         self.visual_embedder = ViTEmbedder()
         self.audio_embedder = AudioEmbedder()
         
-        # Learnable temperature & threshold & scale_factor
-        self.temperature = nn.Parameter(torch.tensor(temperature))
-        self.threshold = nn.Parameter(torch.tensor(initial_threshold))
-        self.scale_factor = nn.Parameter(torch.tensor(scale_factor))
+        # Keep temperature as a learnable parameter
+        self.temperature = nn.Parameter(torch.tensor(temperature, dtype=torch.float32))
         
-        # alpha is not necessarily learnable, we can keep it fixed
-        self.alpha = alpha
-        
-        # Unfreeze the HuBERT model
+        # Unfreeze the HuBERT model (optional, if you want to train end-to-end)
         for param in self.audio_embedder.hubert.parameters():
             param.requires_grad = True
         for param in self.audio_embedder.projection.parameters():
@@ -36,7 +32,7 @@ class AudioVisualModel(nn.Module):
 
     def compute_temporal_similarity_matrix(self, audio_feats, visual_feats):
         """
-        Compute pairwise cosine similarities between audio tokens and visual tokens across time
+        Compute pairwise cosine similarities between audio tokens and visual tokens across time.
         
         Args:
             audio_feats:  (B, Na, D)
@@ -45,199 +41,183 @@ class AudioVisualModel(nn.Module):
         Returns:
             similarities: (B, Na, T, Nv)
         """
-        # Expand a time dimension in audio
+        # Expand a time dimension in audio to broadcast
         audio_feats = audio_feats.unsqueeze(2)  # (B, Na, 1, D)
         
-        # Normalize
+        # Normalize both
         audio_feats = F.normalize(audio_feats, dim=-1)
         visual_feats = F.normalize(visual_feats, dim=-1)
         
-        # Compute similarities
+        # Compute pairwise similarities
         similarities = torch.einsum('bamd,btvd->batv', audio_feats, visual_feats)
         
         # Scale by temperature
-        return similarities / self.temperature
+        similarities = similarities / self.temperature
+        return similarities
 
     def aggregate_temporal_similarities(self, similarities):
         """
-        similarities: (B, Na, T, Nv) or (B, B, Na, T, Nv)
-        
+        Simplified aggregation:
+          1) Max over the visual patches dimension => shape (B, Na, T)
+          2) Mean over time dimension => shape (B, Na)
+          3) Mean over audio tokens => shape (B)
+
+        For the (B, B, Na, T, Nv) case, the same steps but keep track of pairs:
+          1) Max => (B, B, Na, T)
+          2) Mean => (B, B, Na)
+          3) Mean => (B, B)
+
+        Args:
+            similarities: (B, Na, T, Nv) or (B, B, Na, T, Nv)
+
         Returns:
             clip_similarities: (B) or (B, B)
-            fraction_selected: float
         """
-        # 1. threshold in [0,1]
-        threshold_val = torch.sigmoid(self.threshold)  # shape []
-        
-        # 2. max over visual tokens
-        max_visual_similarities = torch.max(similarities, dim=-1)[0]  # shape => (B, Na, T) or (B, B, Na, T)
-        
-        # 3. Compute gating
-        #    raw_diff = max_visual_similarities - threshold_val
-        #    gating = sigmoid(alpha * raw_diff)
-        #    selection_strength = gating * scale_factor
-        raw_diff = max_visual_similarities - threshold_val
-        gating = torch.sigmoid(self.alpha * raw_diff)
-        selection_strength = gating * self.scale_factor
-        
-        # 4. Weighted similarities
-        masked_similarities = max_visual_similarities * selection_strength
-        
-        # 5. Weighted average
-        weighted_sum = masked_similarities.sum(dim=-1)  # sum over T
-        weights_sum = selection_strength.sum(dim=-1)    # sum over T
-        token_similarities = weighted_sum / weights_sum.clamp(min=1e-6)
-        
-        # (Optional) If you want to ensure token_similarities <= 1
-        # token_similarities = token_similarities.clamp(0, 1)
-        
-        # 6. Average over audio tokens
-        clip_similarities = token_similarities.mean(dim=-1)  # => shape (B) or (B, B)
-        
-        # fraction_selected for monitoring
-        # "selected" means gating > 0.5? or raw_diff > 0? Or maybe we consider gating above 0.5
-        # Let's just do a naive approach: fraction of gating > 0.5
-        #passed_threshold = (gating > 0.5).float()
-        #fraction_selected = passed_threshold.mean()
-        fraction_selected = (raw_diff > 0).float().mean()
-        
-        return clip_similarities, fraction_selected
+        # 1) Max over the visual tokens dimension
+        max_across_patches = similarities.max(dim=-1)[0]  # => (B, Na, T) or (B, B, Na, T)
+
+        # 2) Mean across time dimension
+        mean_across_time = max_across_patches.mean(dim=-1)  # => (B, Na) or (B, B, Na)
+
+        # 3) Mean across audio tokens dimension
+        clip_similarities = mean_across_time.mean(dim=-1)   # => (B) or (B, B)
+
+        return clip_similarities
 
     def compute_all_similarities(self, audio_feats, visual_feats):
         """
-        Compute similarities for all pairs in the batch
-        audio_feats:  (B, Na, D)
-        visual_feats: (B, T, Nv, D)
+        Compute pairwise similarities for all (B x B) pairs in the batch.
+
+        Args:
+            audio_feats:  (B, Na, D)
+            visual_feats: (B, T, Nv, D)
         
         Returns:
             clip_similarities: (B, B)
-            similarities: (B, B, Na, T, Nv)
-            fraction_selected: float
+            similarities:      (B, B, Na, T, Nv)
         """
-        B = audio_feats.shape[0]
-        
-        # Expand for all pairs
-        audio_feats = audio_feats.unsqueeze(1)    # (B, 1, Na, D)
-        visual_feats = visual_feats.unsqueeze(0)  # (1, B, T, Nv, D)
-        
-        # Normalize first, then compute
+        B = audio_feats.size(0)
+
+        # Expand for cross-pair matching
+        audio_feats = audio_feats.unsqueeze(1)     # => (B, 1, Na, D) => (B, B, Na, D)
+        visual_feats = visual_feats.unsqueeze(0)   # => (1, B, T, Nv, D) => (B, B, T, Nv, D)
+
+        # Normalize first
         normed_audio_feats = F.normalize(audio_feats, dim=-1)
         normed_visual_feats = F.normalize(visual_feats, dim=-1)
-        
-        # raw similarities
+
+        # Compute raw similarities for all pairs => shape: (B, B, Na, T, Nv)
         similarities = torch.einsum('xyad,xytvd->xyatv', normed_audio_feats, normed_visual_feats)
+
+        # Scale by temperature
         similarities = similarities / self.temperature
-        
-        # Aggregate
-        clip_similarities, fraction_selected = self.aggregate_temporal_similarities(similarities)
-        
-        return clip_similarities, similarities, fraction_selected
 
-    def compute_contrastive_loss(self, clip_similarities, token_sims, fraction_selected):
-        """
-        Compute InfoNCE-like loss with possible regularization
-        clip_similarities: (B, B)
-        token_sims:        (B, B, Na, T, Nv)
-        fraction_selected: float
-        """
-        batch_size = clip_similarities.shape[0]
-        labels = torch.arange(batch_size).to(clip_similarities.device)
-        
-        # a2v direction
-        log_prob_a2v = F.log_softmax(clip_similarities, dim=1)
-        losses_a2v = -log_prob_a2v[torch.arange(batch_size), labels]
-        
-        # v2a direction
-        log_prob_v2a = F.log_softmax(clip_similarities.t(), dim=1)
-        losses_v2a = -log_prob_v2a[torch.arange(batch_size), labels]
-        
-        # average
-        contrastive_loss = (losses_a2v + losses_v2a).mean() / 2
-        
-        # regularization
-        reg_loss = self.compute_regularization_losses(clip_similarities, token_sims)
-        
-        # If you want to remove the "selection_reward" that artificially pushes threshold down, you can:
-        # total_loss = contrastive_loss + reg_loss
-        # 
-        # Alternatively, you can keep a small penalty or reward to avoid degenerate solutions.
-        # For demonstration, let's remove it or just keep it extremely small:
-        
-        selection_reward = 0.0  # We set it to 0 now, or you can keep a tiny penalty if desired.
-        
-        total_loss = contrastive_loss + reg_loss + selection_reward
-        
-        return total_loss, contrastive_loss, reg_loss, fraction_selected, selection_reward
+        # Now aggregate for clip-level similarities
+        clip_similarities = self.aggregate_temporal_similarities(similarities)
 
-    def compute_regularization_losses(self, clip_sims, token_sims):
+        return clip_similarities, similarities
+
+    def compute_contrastive_loss(self, clip_similarities):
         """
-        Regularization with temporal structure
-        token_sims shape: [B, B, Na, T, Nv]
+        Standard InfoNCE-like loss on the clip-level similarities (B, B).
+
+        Args:
+            clip_similarities: (B, B)
+        Returns:
+            contrastive_loss: scalar
         """
-        # 1. Non-negative pressure
-        #    We clamp token_sims between [-20, 0], then penalize them if negative
-        neg_sims = torch.clamp(token_sims, min=-20, max=0)
-        l_nonneg = torch.mean(neg_sims ** 2)
-        
-        # 2. Temperature regularization
-        temp_low = torch.clamp(torch.log(torch.tensor(1.0, device=token_sims.device)) - torch.log(self.temperature), min=0) ** 2
-        temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(4.0, device=token_sims.device)), min=0) ** 2
-        l_cal = temp_low + temp_high
-        
-        # 3. Threshold regularization
-        threshold_val = torch.sigmoid(self.threshold)
-        l_threshold = torch.clamp(threshold_val - 0.9, min=0)**2 + torch.clamp(0.1 - threshold_val, min=0)**2
-        
-        # 4. Scale factor regularization
-        l_scale = torch.clamp(self.scale_factor - 20.0, min=0)**2 + torch.clamp(1.0 - self.scale_factor, min=0)**2
-        
-        reg_loss = (0.15 * l_nonneg +
-                    2.0 * l_cal +
-                    0.1 * l_threshold +
-                    0.1 * l_scale)
-        
+        B = clip_similarities.size(0)
+        labels = torch.arange(B, dtype=torch.long, device=clip_similarities.device)
+
+        # Audio-to-Visual direction
+        log_prob_a2v = F.log_softmax(clip_similarities, dim=1)  # (B, B)
+        losses_a2v = -log_prob_a2v[torch.arange(B), labels]
+
+        # Visual-to-Audio direction
+        log_prob_v2a = F.log_softmax(clip_similarities.t(), dim=1)  # (B, B)
+        losses_v2a = -log_prob_v2a[torch.arange(B), labels]
+
+        # Average the two directions
+        contrastive_loss = 0.5 * (losses_a2v + losses_v2a).mean()
+        return contrastive_loss
+
+    def compute_regularization_losses(self, similarities):
+        """
+        Regularize:
+          1) Non-negative pressure: penalize negative values in raw similarities
+          2) Temperature >= 1: penalize if self.temperature < 1
+
+        Args:
+            similarities: (B, B, Na, T, Nv) matrix of raw similarities.
+
+        Returns:
+            reg_loss: scalar
+        """
+        # (1) Non-negative pressure
+        #     We clamp negative portion and penalize with squared error
+        negative_part = torch.clamp(similarities, max=0.0)  # negative or zero
+        l_nonneg = (negative_part ** 2).mean()
+
+        # (2) Temperature >= 1 pressure
+        #     We encourage temperature to be at least 1
+        t = self.temperature
+        l_temp = torch.clamp(1.0 - t, min=0.0) ** 2
+
+        reg_loss = l_nonneg + l_temp
         return reg_loss
 
     def forward(self, frames, audio):
         """
-        Forward pass
+        Forward pass:
+          1) Embed
+          2) Compute (B, B) similarities + raw 5D similarities
+          3) InfoNCE loss + small regularization
+
         Args:
             frames: (B, T, C, H, W)
-            audio: (B, samples)
+            audio:  (B, samples)
         """
-        # 1. embed
-        visual_feats = self.visual_embedder(frames)  # (B, T, Nv, D)
-        audio_feats = self.audio_embedder(audio)     # (B, Na, D)
-        
+        # 1) Embed frames & audio
+        visual_feats = self.visual_embedder(frames)  # => (B, T, Nv, D)
+        audio_feats = self.audio_embedder(audio)     # => (B, Na, D)
+
         if self.training:
-            # compute similarities and loss
-            clip_sims, token_sims, fraction_selected = self.compute_all_similarities(audio_feats, visual_feats)
-            return self.compute_contrastive_loss(clip_sims, token_sims, fraction_selected)
+            # 2) All-pairs
+            clip_sims, similarities_5d = self.compute_all_similarities(audio_feats, visual_feats)
+            # 3) Compute InfoNCE + Regularization
+            contrastive_loss = self.compute_contrastive_loss(clip_sims)
+            reg_loss = self.compute_regularization_losses(similarities_5d)
+
+            total_loss = contrastive_loss + 0.1 * reg_loss
+            return total_loss, contrastive_loss, reg_loss
+
         else:
-            # inference => just compute temporal similarity matrix
+            # Inference => Just compute per-sample temporal matrix
             similarities = self.compute_temporal_similarity_matrix(audio_feats, visual_feats)
             return similarities
 
+
 if __name__ == "__main__":
-    # Sanity test
-    model = AudioVisualModel()
+    # Quick sanity test
+    model = AudioVisualModel(temperature=2.5)
     model.train()
-    
+
     batch_size = 2
-    num_frames = 10
-    
+    num_frames = 8
+
     frames = torch.randn(batch_size, num_frames, 3, 224, 224)
     audio = torch.randn(batch_size, 16331)
-    
+
+    # Training forward pass
     try:
-        loss_tuple = model(frames, audio)
+        loss = model(frames, audio)
         print("Training forward pass success!")
-        print("Loss tuple:", loss_tuple)
+        print("Loss:", loss.item())
     except Exception as e:
         print("Error during training:", str(e))
         raise e
-    
-    # Test inference
+
+    # Inference test
     try:
         model.eval()
         with torch.no_grad():

@@ -93,7 +93,7 @@ class AudioVisualTrainer:
 
         self.dataset = AudioVisualDataset(
             data_root=video_dir,
-            sample_fps=20
+            sample_fps=8
         )
 
         self.batch_sampler = VideoBatchSampler(
@@ -108,7 +108,7 @@ class AudioVisualTrainer:
             persistent_workers=True,
             pin_memory=True,
             collate_fn=collate_fn,
-            prefetch_factor=6
+            prefetch_factor=5
         )
         
         # Initially freeze Vision and HuBERT parameters
@@ -178,8 +178,8 @@ class AudioVisualTrainer:
                 pass
             else:
                 wandb.init(
-                    project="DenseVid",
-                    name="DenseSmol",
+                    project="DenseMax",
+                    name="WhatTheFuck",
                     config=self.config
                 )
 
@@ -194,8 +194,8 @@ class AudioVisualTrainer:
         if self.use_wandb and wandb.run is None:
             print("No wandb run found, initializing new run")
             wandb.init(
-                project="DenseVid",
-                name="DenseSmol",
+                project="DenseMax",
+                name="WhatTheFuck",
                 config=self.config
             )
         
@@ -279,24 +279,24 @@ class AudioVisualTrainer:
                 'audios': checkpoint['vis_samples']['audios'].to(self.device),
                 'video_paths': checkpoint['vis_samples']['video_paths']
             }
-        '''
+        
         if self.use_wandb:
             wandb_run_id = checkpoint.get('wandb_run_id')
             if wandb_run_id is not None:
                 wandb.init(
-                    project="DenseVid",
-                    name=f"DenseSmol",  
+                    project="DenseMax",
+                    name=f"WhatTheFuck",  
                     config=self.config,
                     #id=wandb_run_id,
                     #resume="must"
                 )
             else:
                 wandb.init(
-                    project="DenseVid",
-                    name=f"DenseSmol",
+                    project="DenseMax",
+                    name=f"WhatTheFuck",
                     config=self.config
                 )
-        ''' 
+        
         current_epoch = self.start_epoch
         dataloader_len = len(self.dataloader)
 
@@ -462,14 +462,10 @@ class AudioVisualTrainer:
                 frames = batch['frame'].to(self.device)
                 audio = batch['audio'].to(self.device)
                 #print(frames.shape)
-                #print(audio.shape)
-                loss, contrastive_loss, reg_loss, fraction_selected, selection_reward = self.model(frames, audio)
+               # print(audio.shape)
+                loss, contrastive_loss, reg_loss, = self.model(frames, audio)
 
-                if self.use_wandb:
-                    wandb.log({
-                        "fraction_selected": fraction_selected.item()
-                    })
-
+                
                 if loss.item() > 10:
                     print(f"Skipping batch with loss: {loss.item():.4f}")
                     continue
@@ -503,7 +499,7 @@ class AudioVisualTrainer:
                     loss_value = loss.item() * self.gradient_accumulation_steps
                     contrastive_loss_value = contrastive_loss.item() * self.gradient_accumulation_steps
                     reg_loss_value = reg_loss.item() * self.gradient_accumulation_steps
-                    #selection_reward_value = selection_reward.item() * self.gradient_accumulation_steps
+        
                     epoch_losses.append(loss_value)
                     pbar.set_postfix({'loss': f'{loss_value:.4f}'})
 
@@ -512,12 +508,8 @@ class AudioVisualTrainer:
                             "train_loss": loss_value,
                             "projection_lr": self.optimizer_projection.param_groups[0]['lr'],
                             "temperature": self.model.temperature.item(),
-                            "raw_threshold": self.model.threshold.item(),
-                            "scale_factor": self.model.scale_factor.item(),
-                            "threshold": torch.sigmoid(self.model.threshold).item(),
                             "contrastive_loss": contrastive_loss_value,
                             "reg_loss": reg_loss_value,
-                            #"selection_reward_value": selection_reward_value
                         }
                         if epoch >= self.config['unfreeze_hubert_epoch']:
                             log_dict["hubert_lr"] = self.optimizer_hubert.param_groups[0]['lr']
@@ -577,18 +569,18 @@ class AudioVisualTrainer:
 if __name__ == "__main__":
     trainer = AudioVisualTrainer(
         video_dir='/home/cis/VGGSound_Splits',
-        output_dir='./vid_outputs',
-        batch_size=32,
-        num_epochs=50,
+        output_dir='./outputs',
+        batch_size=7,
+        num_epochs=10,
         learning_rate=8e-4,
         use_wandb=True,
-        num_vis_samples=20,
-        gradient_accumulation_steps=2,
-        vis_every=15000,
+        num_vis_samples=7,
+        gradient_accumulation_steps=5,
+        vis_every=20000,
         num_workers=16,
         force_new_training=False,
-        unfreeze_hubert_epoch=0,
-        unfreeze_vit_epoch=0,
-        save_every_steps=10000
+        unfreeze_hubert_epoch=1,
+        unfreeze_vit_epoch=5,
+        save_every_steps=20000
     )
     trainer.train()

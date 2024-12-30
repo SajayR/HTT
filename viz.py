@@ -14,8 +14,8 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
 class AudioVisualizer:
     def __init__(self, output_resolution=(1920, 1080)):
         self.output_res = output_resolution
-        self.frame_width = output_resolution[0] // 3
-        self.frame_height = (output_resolution[1] - 100)
+        self.frame_width = output_resolution[0] // 4
+        self.frame_height = (output_resolution[1] - 100) // 2
         self.positions = self._calculate_frame_positions()
         
         # Create custom colormap
@@ -29,12 +29,11 @@ class AudioVisualizer:
 
     def _calculate_frame_positions(self):
         positions = []
-        # Center the 3 frames horizontally
-        frame_spacing = (self.output_res[0] - (3 * self.frame_width)) // 4  # Equal spacing between frames
-        for i in range(3):
-            x = frame_spacing + i * (self.frame_width + frame_spacing)
-            y = (self.output_res[1] - self.frame_height) // 2  # Center vertically
-            positions.append((x, y))
+        for row in range(2):
+            for col in range(4):
+                x = col * self.frame_width
+                y = row * self.frame_height
+                positions.append((x, y))
         return positions
 
     def extract_frames_from_video(self, video_path: str) -> torch.Tensor:
@@ -50,7 +49,7 @@ class AudioVisualizer:
         
         original_fps = float(video_stream.average_rate)
         num_original_frames = int(round(original_fps * 1.0))  # 1s duration
-        frame_indices = np.linspace(0, num_original_frames - 1, 3, dtype=int)
+        frame_indices = np.linspace(0, num_original_frames - 1, 8, dtype=int)
         print(f"\nCalculated frame indices: {frame_indices}")
         
         frames = []
@@ -202,8 +201,10 @@ class AudioVisualizer:
                 # Add each frame with its attention map
                 for i, (x, y) in enumerate(self.positions):
                     frame = processed_frames[i]
-                    attn = similarities[t, i].reshape(16, 16).cpu().numpy()
+                    attn = similarities[t, i].reshape(14, 14).cpu().numpy()
                     overlay = self._create_frame_overlay(frame, attn)
+                    #print(f"Overlay shape: {overlay.shape}") #980, 640, 3 ??? 
+                    #print(f"Canvas shape: {canvas.shape}") 
                     canvas[y:y+self.frame_height, x:x+self.frame_width] = overlay
                 
                 # Add progress bar
@@ -296,7 +297,7 @@ class AudioVisualizer:
                 # Add each frame with its attention map
                 for i, (x, y) in enumerate(self.positions):
                     frame = processed_frames[i]
-                    attn = similarities[t, i].reshape(16, 16).cpu().numpy()
+                    attn = similarities[t, i].reshape(14, 14).cpu().numpy()
                     overlay = self._create_frame_overlay(frame, attn)
                     canvas[y:y+self.frame_height, x:x+self.frame_width] = overlay
                 
@@ -324,7 +325,7 @@ if __name__ == "__main__":
     visualizer = AudioVisualizer()
     
     # Path to a test video (1-second clip)
-    video_path = "/home/cisco/nvmefudge/vggsound_1seconds/0_2.mp4"  # Update with your path
+    video_path = "/home/cis/VGGSound_Splits/0_2.mp4"  # Update with your path
     
     # Extract actual frames from video
     frames = visualizer.extract_frames_from_video(video_path)  # [10, 3, 224, 224]
@@ -343,7 +344,7 @@ if __name__ == "__main__":
             
         def visual_embedder(self, frames):
             # Simulate visual embeddings [1, T, Nv, D]
-            return torch.randn(1, 10, 256, 512)  # 256 = 16x16 patches
+            return torch.randn(1, 8, 196, 512)  # 256 = 16x16 patches
             
         def audio_embedder(self, audio):
             # Simulate audio embeddings [1, Na, D]
@@ -351,19 +352,19 @@ if __name__ == "__main__":
             
         def compute_temporal_similarity_matrix(self, audio_feats, visual_feats):
             # Random similarities [1, Na, T, Nv]
-            sims = torch.randn(1, 50, 10, 256)  # [batch, audio_tokens, frames, visual_tokens]
+            sims = torch.randn(1, 50, 8, 196)  # [batch, audio_tokens, frames, visual_tokens]
             # Make the attention patterns more structured/interesting
-            sims = sims.view(1, 50, 10, 16, 16)  # Reshape to spatial layout
+            sims = sims.view(1, 50, 8, 14, 14)  # Reshape to spatial layout
             
             # Create coordinate grid
-            y_coords = torch.arange(16).float()
-            x_coords = torch.arange(16).float()
+            y_coords = torch.arange(14).float()
+            x_coords = torch.arange(14).float()
             y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
             
             # Add some gaussian blobs for more realistic looking attention
             for t in range(50):
-                center_x = torch.randint(0, 16, (1,)).item()
-                center_y = torch.randint(0, 16, (1,)).item()
+                center_x = torch.randint(0, 14, (1,)).item()
+                center_y = torch.randint(0, 14, (1,)).item()
                 
                 # Compute distances to center point
                 distances = torch.sqrt((x_grid - center_x)**2 + (y_grid - center_y)**2)
@@ -372,7 +373,7 @@ if __name__ == "__main__":
                 # Add to all frames for this time step
                 sims[0, t, :, :, :] += gaussian.unsqueeze(0)
             
-            sims = sims.view(1, 50, 10, 256)
+            sims = sims.view(1, 50, 8, 196)
             return torch.sigmoid(sims)  # Normalize to [0,1]
     
     # Create dummy model

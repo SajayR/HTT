@@ -1,27 +1,28 @@
 import torch
 import torch.nn as nn
-import timm
+from transformers import TimesformerModel
 
 class ViTEmbedder(nn.Module):
-    def __init__(self, model_name='vit_base_patch16_224', pretrained=True):
+    def __init__(self,):
         super().__init__()
         
-        self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14') #torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        self.model = TimesformerModel.from_pretrained("facebook/timesformer-base-finetuned-k400")
 
-        self.projection = nn.Linear(384, 512)
+        self.projection = nn.Linear(768, 512)
         
         for param in self.model.parameters():
             param.requires_grad = True
             
     def forward(self, x):
         B, T, C, H, W = x.shape
-        # Reshape to treat each frame as a separate batch item
-        x = x.reshape(B * T, C, H, W)
-        # Process through ViT
-        embeddings = self.model.get_intermediate_layers(x, n=1)[0]
-        embeddings = self.projection(embeddings)
-        # Reshape back to separate batch and time dimensions
-        embeddings = embeddings.reshape(B, T, embeddings.shape[1], -1)
+        outputs = self.model(x)
+        embeddings = outputs.last_hidden_state  # (B, (T*196)+1, 768)
+        embeddings = embeddings[:, 1:, :]      # (B, T*196, 768)
+        
+        # Reshape to separate temporal and spatial dimensions
+        num_patches = 196  # 14x14 patches
+        embeddings = embeddings.reshape(B, T, num_patches, 768)  # (B, T, 196, 768)
+        embeddings = self.projection(embeddings)  # (B, T, 196, 512)
         return embeddings
 
 # Test it out!
@@ -37,7 +38,7 @@ if __name__ == "__main__":
     print(vit.model)
     
     # Create dummy batch of images
-    batch = torch.randn(2, 10, 3, 224, 224, device="cuda")
+    batch = torch.randn(2, 8, 3, 224, 224, device="cuda")
     
     # Get embeddings
     with torch.no_grad():
