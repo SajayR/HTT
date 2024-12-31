@@ -578,7 +578,7 @@ if __name__ == "__main__":
         gradient_accumulation_steps=5,
         vis_every=20000,
         num_workers=16,
-        force_new_training=False,
+        force_new_training=True,
         unfreeze_hubert_epoch=1,
         unfreeze_vit_epoch=5,
         save_every_steps=20000

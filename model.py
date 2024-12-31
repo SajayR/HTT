@@ -5,7 +5,7 @@ from vit import ViTEmbedder
 from hubert import AudioEmbedder
 import warnings
 warnings.filterwarnings("ignore")
-
+import time
 class AudioVisualModel(nn.Module):
     def __init__(self, temperature=2):
         """
@@ -160,8 +160,9 @@ class AudioVisualModel(nn.Module):
 
         # (2) Temperature >= 1 pressure
         #     We encourage temperature to be at least 1
-        t = self.temperature
-        l_temp = torch.clamp(1.0 - t, min=0.0) ** 2
+        temp_low = torch.clamp(torch.log(torch.tensor(1.0, device=similarities.device)) - torch.log(self.temperature), min=0) ** 4
+        temp_high = torch.clamp(torch.log(self.temperature) - torch.log(torch.tensor(3.0, device=similarities.device)), min=0) ** 4
+        l_temp = temp_low + temp_high 
 
         reg_loss = l_nonneg + l_temp
         return reg_loss
@@ -178,17 +179,23 @@ class AudioVisualModel(nn.Module):
             audio:  (B, samples)
         """
         # 1) Embed frames & audio
+        #start_time = time.time()
         visual_feats = self.visual_embedder(frames)  # => (B, T, Nv, D)
         audio_feats = self.audio_embedder(audio)     # => (B, Na, D)
+        #end_time = time.time()
+        #print(f"Time taken for embedding: {end_time - start_time} seconds")
 
         if self.training:
             # 2) All-pairs
+            #start_time = time.time()
             clip_sims, similarities_5d = self.compute_all_similarities(audio_feats, visual_feats)
             # 3) Compute InfoNCE + Regularization
             contrastive_loss = self.compute_contrastive_loss(clip_sims)
             reg_loss = self.compute_regularization_losses(similarities_5d)
+            #end_time = time.time()
+            #print(f"Time taken for all-pairs: {end_time - start_time} seconds")
 
-            total_loss = contrastive_loss + 0.1 * reg_loss
+            total_loss = contrastive_loss + 0.3 * reg_loss
             return total_loss, contrastive_loss, reg_loss
 
         else:
